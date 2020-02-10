@@ -147,7 +147,7 @@ class Hazelplum
 
         $this->error = 0;
         $this->parseOptions($options);
-        $this->get_db_defs();
+        $this->_get_db_defs();
     }
 
     /**
@@ -1241,7 +1241,7 @@ class Hazelplum
         switch ($err) {
         case self::ERROR_DATABASE_NOT_FOUND:
             throw new DatabaseNotFoundException(
-                sprintf("E%s: DBD file not found: '%s'.", self::ERROR_DATABASE_NOT_FOUND, $context
+                sprintf("E%s: DBD file not found: '%s'.", self::ERROR_DATABASE_NOT_FOUND, $context)
             );
             break;
         case 2:
