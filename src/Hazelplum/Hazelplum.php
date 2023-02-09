@@ -1,28 +1,26 @@
 <?php
+
 /**
- * HazelplumDB
+ * Hazelplum database
+ *
  * Delimited Text File Database System
  *
- * @package Hazelplum
+ * @package Projekt\Db
  */
 
 namespace Hazelplum;
 
-use Hazelplum\Exception\DatabaseNotFoundException;
-
 /*
-Hazelplum DB v1.7 (2020-02-09))
+Hazelplum DB v2.1 (2023-01-17))
 Delimited Text File Database System
 
 PUBLIC METHODS:
 ===============
-- show_tables ()
-- getTables ()
-- select ($table, $columnlist='*', $criteria='', $order='', $headers=true)
-- insert ($table, $columnlist='*', $inData)
-- update ($table, $columnlist, $inUpdateData, $criteria='')
-- delete ($table, $criteria)
-- subSelect ($array, $index, $criteria, $order)
+get_tables ()
+select ($table, $columnlist='*', $criteria='', $order='')
+insert ($table, $columnlist='*', $in_data)
+update ($table, $columnlist, $in_update_data, $criteria='')
+delete ($table, $criteria)
 
 CHANGELOG:
 ==========
@@ -32,7 +30,7 @@ CHANGELOG:
             eg. if (preg_match($ccol_value."i", $aData[$r][$ccol_id])) {.
 2007-01-05: Fixed a bug where the order by in the select would not work
             correctly when ordering by a field that contained an empty value.
-2007-03-28: Added clearstatcache() in the _dtf_write_all() function.
+2007-03-28: Added clearstatcache() in the dtf_write_all() function.
             This allows multiple inserts within the same php script call.
 2008-10-07: Updated comments, adjusted some formatting
 2007-12-27: Updated insert() method to return the id of the new record.
@@ -49,19 +47,39 @@ CHANGELOG:
 2009-10-21: Updated select to default to not return headers
 2009-10-21: Updated columnlist parsing to remove '`' character
 2017-07-19: Update throw error to actually throw errors
-            Correct bug with _dbd_parse_data not actually getting col names
+            Correct bug with dbd_parse_data not actually getting col names
+2020-02-09: Change caching strategy to use serialize instead of var_export/eval
+2020-02-11: Remove headers option from select()
+            Much clean up and refactoring
+2021-06-12: Updates to make compatible with PHP 8.0
+2023-01-17: Additional refactoring
  */
 
 /**
  * Hazelplum
  *
  * @package Hazelplum
- * @version 1.6
- * @author Jansen Price <sumpygump@gmail.com>
+ * @author Jansen Price <jansen.price@gmail.com>
+ * @license http://www.opensource.org/licenses/mit-license.php MIT
+ * @version 2.1
  */
 class Hazelplum
 {
-    const ERROR_DATABASE_NOT_FOUND = 1;
+    public const COL_DELIMITER = 31; // Unit separator
+    public const ROW_DELIMITER = 30; // Row separator
+
+    public const TABLE_INDEX_NOT_FOUND = -1;
+    public const COL_INDEX_NOT_FOUND = -1;
+
+    public const ERR_NONE = 0;
+    public const ERR_DBD_FILE_MISSING = 1;
+    public const ERR_MISSING_TABLE_PARAM = 2;
+    public const ERR_TABLE_NOT_FOUND = 3;
+    public const ERR_KEY_NOT_UNIQUE = 4;
+    public const ERR_DBD_FILE_EMPTY = 5;
+    public const ERR_INVALID_COLUMN_NAME = 6;
+    public const ERR_COLUMN_LIST_MISMATCH = 7;
+    public const ERR_AUTOKEY_FAIL = 8;
 
     /**
      * Path to where the datafiles live
@@ -101,16 +119,9 @@ class Hazelplum
     /**
      * Row delimiter in the data files
      *
-     * @var mixed
+     * @var string
      */
     protected $row_delimiter;
-
-    /**
-     * Storage for error messages
-     *
-     * @var array
-     */
-    protected $error;
 
     /**
      * Storage for list of tables
@@ -124,92 +135,76 @@ class Hazelplum
      *
      * @var array
      */
-    private $_options;
+    private $options;
 
     /**
      * Constructor
      *
-     * @param string $in_datapath Path to database files
+     * @param string $in_datapath      Path to database files
      * @param string $in_database_name Name of database
-     * @param array $options Array of options to configure object
+     * @param array  $options          Array of options to configure object
      */
-    public function __construct($in_datapath, $in_database_name,
-        $options=array())
+    public function __construct($in_datapath, $in_database_name, $options = [])
     {
-        $this->datapath = rtrim($in_datapath, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $this->datapath = rtrim($in_datapath, DIRECTORY_SEPARATOR);
         $this->database_name = $in_database_name;
-        $this->tables = array();
+        $this->tables = [];
 
         $this->db_fileextension = '.dbd';
         $this->table_fileextension = '.dtf';
-        $this->col_delimiter = chr(31); // us
-        $this->row_delimiter = chr(30); // rs
+        $this->col_delimiter = chr(self::COL_DELIMITER);
+        $this->row_delimiter = chr(self::ROW_DELIMITER);
 
-        $this->error = 0;
-        $this->parseOptions($options);
-        $this->_get_db_defs();
+        $this->parse_options($options);
+        $this->get_db_defs();
     }
 
     /**
-     * _parse_options
+     * Parse options
      *
-     * @param array $options The options to parse
+     * @param  array $options The options to parse
      * @return void
      */
-    private function parseOptions($options)
+    private function parse_options($options)
     {
-        // set up defaults
-        $this->_options = [
+        // Set up defaults
+        $this->options = [
             'prepend_databasename_to_table_filename' => false,
             'use_cache' => true,
         ];
 
-        // update with values from array passed in.
-        foreach ($options as $key=>$option) {
-            switch($key) {
-            case 'prepend_databasename_to_table_filename':
-                $this->_options[$key] = true;
-                break;
-            case 'no_cache':
-                $this->_options['use_cache'] = false;
-                break;
-            case 'compat_delimiter_mode':
-                // use the old standard delimiters
-                $this->col_delimiter = chr(200);
-                $this->row_delimiter = chr(201);
-                break;
+        // Update with values from array passed in.
+        foreach ($options as $key => $option) {
+            switch ($key) {
+                case 'prepend_databasename_to_table_filename':
+                    $this->options[$key] = (bool) $option;
+                    break;
+                case 'use_cache':
+                    $this->options['use_cache'] = (bool) $option;
+                    break;
+                case 'no_cache':
+                    // This one is here for compatibility
+                    $this->options['use_cache'] = ! (bool) $option;
+                    break;
+                case 'compat_legacy_delimiters':
+                    if ($option) {
+                        // Use the legacy delimiters
+                        $this->col_delimiter = chr(200);
+                        $this->row_delimiter = chr(201);
+                    }
+                    break;
             }
         }
     }
 
     /**
-     * Show tables
+     * Get the options that are set
      *
-     * Utility function to output a list of tables in the currently loaded
-     * database
-     *
-     * @return void
+     * @return array
      */
-    public function show_tables()
+    public function get_options()
     {
-        echo "<div class=\"tabledef\" "
-            . "style=\"font-family:courier new;font-size:10pt;\">\n";
-
-        for ($i = 0; $i < count($this->tables); $i++) {
-            echo "<b>" . $this->tables[$i]['name'] . "</b>"
-                . " (".$this->tables[$i]['cols'].")\n"
-                . "<div style=\"margin-left:1em;\">";
-
-            for ($c = 0; $c < $this->tables[$i]['cols']; $c++) {
-                echo $this->tables[$i][$c];
-                if ($this->tables[$i][$c] == $this->tables[$i]['key']) {
-                    echo " (PK)";
-                }
-                echo "<br />";
-            }
-            echo "</div><br />\n";
-        }
-        echo "</div>\n";
+        return $this->options;
     }
 
     /**
@@ -221,7 +216,7 @@ class Hazelplum
     {
         $tables = [];
 
-        foreach($this->tables as $table) {
+        foreach ($this->tables as $table) {
             $tables[] = $table['name'];
         }
 
@@ -231,42 +226,52 @@ class Hazelplum
     /**
      * Get the schema for a table
      *
-     * @param mixed $table_name Name of table
+     * @param  mixed $table_name Name of table
      * @return array
      */
     public function get_table_schema($table_name)
     {
-        if (!$table_name) {
-            $this->_throw_error(2, 'Missing table name');
+        $tabid = $this->get_valid_tabid($table_name);
+        return $this->get_cols_all($tabid);
+    }
+
+    /**
+     * Get the valid table id otherwise throw error
+     *
+     * @param  mixed $table_name
+     * @return int
+     */
+    protected function get_valid_tabid($table_name)
+    {
+        if (empty($table_name) || !$table_name) {
+            $this->throw_error(
+                self::ERR_MISSING_TABLE_PARAM,
+                'Missing table name'
+            );
         }
 
-        $tabid = $this->_get_tabid($table_name);
+        $tabid = $this->get_tabid($table_name);
 
-        if ($tabid === 'Not found') {
-            $this->_throw_error(3, $table); // table doesn't exist
+        if ($tabid === self::TABLE_INDEX_NOT_FOUND) {
+            // Table doesn't exist
+            $this->throw_error(
+                self::ERR_TABLE_NOT_FOUND,
+                $table_name
+            );
         }
 
-        return $this->_get_cols_all($tabid);
+        return $tabid;
     }
 
     /**
      * Get the primary key column name for a given table
      *
-     * @param mixed $table_name The name of the table
+     * @param  mixed $table_name The name of the table
      * @return string
      */
     public function get_primary_key($table_name)
     {
-        if (!$table_name) {
-            $this->_throw_error(2, 'Missing table name');
-        }
-
-        $tabid = $this->_get_tabid($table_name);
-
-        if ($tabid === 'Not found') {
-            $this->_throw_error(3, $table); // table doesn't exist
-        }
-
+        $tabid = $this->get_valid_tabid($table_name);
         $key_id = $this->tables[$tabid]['key'];
         return $key_id;
     }
@@ -274,603 +279,534 @@ class Hazelplum
     /**
      * Return an array of data from database
      *
-     * @param string $table The name of the table
-     * @param string $columnlist Comma separated list of columns to select
-     * @param string $criteria a simple statement to limit records (COL=VALUE)
-     * @param string $order specify column name to for sort order of results
-     * @param boolean $headers Return a row with the column names (1st row)
+     * @param  string $table      The name of the table
+     * @param  string $columnlist Comma separated list of columns to select
+     * @param  string $criteria   Simple statement to limit records (COL=VALUE)
+     * @param  string $order      Specify column name to for sort order of results
      * @return array An array of the data retrieved
      */
-    public function select($table, $columnlist='*', $criteria='',
-        $order='', $headers=false)
+    public function select($table, $columnlist = '*', $criteria = '', $order = '')
     {
-        $aData = array();
+        // Verify table exists
+        $tabid = $this->get_valid_tabid($table);
 
-        //verify table exists
-        if (!empty($table)) {
-            $tabid = $this->_get_tabid($table);
-            if ($tabid === 'Not found') {
-                $this->_throw_error(3, $table); //table does not exist.
-            }
-        } else {
-            //table name is blank.
-            $this->_throw_error(2, "Please enter table name");
-        }
-
-        //get the whole table
-        $aColData = $this->_get_cols_all($tabid);
-        $aData[0] = $aColData;
-
-        $aTabData = $this->_get_table_data($table);
-        $count    = count($aTabData);
-        for ($r = 0; $r < $count; $r++) {
-            $aData[] = $aTabData[$r];
-        }
+        // Get the whole table
+        $cols = $this->get_cols_all($tabid);
+        $data = $this->get_table_data($table);
 
         //----------------------------------
-        //parse criteria string (COL=VALUE)
+        // Parse criteria string (COL=VALUE)
         if ($criteria != '') {
-            $criteria_def = explode("=", $criteria);
-            $ccol_name    = trim($criteria_def[0]);
-            $ccol_value   = trim($criteria_def[1]);
-            if (substr($ccol_value, 0, 1) == "/"
-                && substr($ccol_value, -1, 1) == "/"
-            ) {
-                $regex = true;
-            } else {
-                $regex = false;
-            }
+            $criteria = $this->parse_criteria($criteria, $tabid);
 
-            $ccol_id = $this->_get_col_id($aColData, $ccol_name);
-            if ($ccol_id === 'Not found') {
-                //column doesn't exist. Ignore it.
-            } else {
-                $aRetData   = array();
-                $aRetData[] = $aData[0];
-                $count      = count($aData);
-                for ($r=1;$r<$count;$r++) {
-                    if ($regex) {
-                        //use regular expression
-                        if (preg_match($ccol_value."i", $aData[$r][$ccol_id])) {
-                            //found a match, return this row.
-                            $aRetData[] = $aData[$r];
-                        }
-                    } else {
-                        //plain search.
-                        if ($aData[$r][$ccol_id] == $ccol_value) {
-                            //found a match, return this row.
-                            $aRetData[] = $aData[$r];
-                        }
-                    }
-                }
-                $aData = $aRetData;
+            $criteria->col_id = $this->get_col_id($cols, $criteria->col_name);
+            if ($criteria->col_id !== false) {
+                $data = $this->find_matching_rows($criteria, $data);
             }
         }
 
         //----------------------------------
-        //parse order string (comma delimited??)
+        // Parse order string (TODO: comma delimited??)
         if ($order != '') {
-            //get the key column id
-            $key_id = $this->_get_col_id(
-                $aColData, $this->tables[$tabid]['key']
-            );
-
             $order_parts = explode(" ", $order);
-            $ocol_id     = $this->_get_col_id($aColData, $order_parts[0]);
-            if ($ocol_id === 'Not found') {
-                //column doesn't exist. Ignore it.
+            $ocol_id = $this->get_col_id($cols, $order_parts[0]);
+            if ($ocol_id === self::COL_INDEX_NOT_FOUND) {
+                // Column doesn't exist. Ignore it.
             } else {
-                $order_values = array();
-                $count        = count($aData);
-                for ($r=1;$r<$count;$r++) {
-                    $order_values[$r] = $aData[$r][$ocol_id];
+                $order_values = [];
+                foreach ($data as $row) {
+                    $order_values[] = $row[$ocol_id];
                 }
-                //uasort($order_values, strcasecmp);
+
+                // Sort but keep array keys
                 natsort($order_values);
 
-                if (isset($order_parts[1])
+                if (
+                    isset($order_parts[1])
                     && strtolower($order_parts[1]) == 'desc'
                 ) {
                     $order_values = array_reverse($order_values, true);
                 }
 
-                $aRetData    = array();
-                $aRetData[0] = $aData[0];
-                reset($aData);
-                reset($order_values);
-                while (list($key, $value) = each($order_values)) {
-                    $aRetData[] = $aData[$key];
-                    //$aRetData[] = $aData[key($order_values)];
-                    //next($order_values);
+                $result_data = [];
+                foreach ($order_values as $key => $value) {
+                    $result_data[] = $data[$key];
                 }
-                $aData = $aRetData;
+                $data = $result_data;
             }
         }
 
-        if (!$headers) {
-            $this->_remove_headers($aData);
-        }
-
-        //convert to assoc array
-        $aRetData = array();
-        $count    = count($aData);
-        for ($r=0;$r<$count;$r++) {
-            if ($aData[$r]) {
-                foreach ($aData[$r] as $key => $value) {
+        // Convert to assoc array
+        $result_data = [];
+        foreach ($data as $row) {
+            if ($row) {
+                $record = [];
+                foreach ($row as $key => $value) {
                     // assoc
-                    $aRetData[$r][$aColData[$key]] = $value;
-                    // int
-                    //$aRetData[$r][$key]            = $value;
+                    $record[$cols[$key]] = $value;
                 }
+                $result_data[] = $record;
             }
         }
-        $aData = $aRetData;
+        $data = $result_data;
 
         //----------------------------------
-        //limit data returned by $columnlist input param (comma delimited)
-        if ($columnlist != '*') {
-            // Remove ` character to be compatible with MySql format
-            $columnlist = str_replace('`', '', $columnlist);
-
-            $cols = explode(",", $columnlist);
-
-            $aRetData = array();
-            $count    = count($aData);
-            for ($r=0;$r<$count;$r++) {
-                foreach ($cols as $key=>$value) {
-                    $value = trim($value);
-
-                    $aRetData[$r][$key]   = $aData[$r][$value];
-                    $aRetData[$r][$value] = $aData[$r][$value];
+        // Limit data returned by $columnlist input param (comma delimited or array)
+        $cols_requested = $this->parse_columnlist($columnlist);
+        if ($cols_requested != []) {
+            // Validate the column names requested
+            foreach ($cols_requested as $col) {
+                $index = $this->get_col_id($cols, $col);
+                if ($index === self::COL_INDEX_NOT_FOUND) {
+                    $this->throw_error(
+                        self::ERR_INVALID_COLUMN_NAME,
+                        "on table " . $table . ": " . $col,
+                    );
                 }
             }
 
-            $aData = $aRetData;
+            // Now replace each row with the requested columns only
+            $result_data = [];
+            foreach ($data as $row) {
+                $record = [];
+                foreach ($cols_requested as $col_name) {
+                    $record[$col_name] = $row[$col_name];
+                }
+                $result_data[] = $record;
+            }
+
+            $data = $result_data;
         }
 
-        return $aData;
+        return $data;
     }
 
     /**
      * Insert data into the desired table
      *
-     * @param string $table The name of the table
-     * @param string $columnlist Comma separated list of columns to insert into
-     * @param array $inData An key-value array of the data to be inserted.
+     * @param  string $table      The name of the table
+     * @param  string $columnlist Comma separated list of columns to insert into
+     * @param  array  $in_data    An key-value array of the data to be inserted.
      * @return int|bool The inserted id or false
      */
-    public function insert($table, $columnlist='*', $inData=array())
+    public function insert($table, $columnlist = '*', $in_data = [])
     {
-        $make_new_table = false;
+        // Verify table exists in db.
+        $tabid = $this->get_valid_tabid($table);
 
-        if (!file_exists($this->_get_table_filename($table))) {
+        $make_new_table = false;
+        $table_filename = $this->get_table_filename($table);
+
+        if (!file_exists($table_filename)) {
             $make_new_table = true;
         } else {
-            $test_data = file_get_contents($this->_get_table_filename($table));
+            $test_data = file_get_contents($table_filename);
             if (empty($test_data) || preg_match("/^\s+$/", $test_data)) {
                 $make_new_table = true;
             }
         }
 
-        //verify table exists in db.
-        if (!empty($table)) {
-            $tabid = $this->_get_tabid($table);
-            if ($tabid === 'Not found') {
-                $this->_throw_error(3, $table); //table does not exist.
-                $make_new_table = true;
-            }
+        // Get the whole table
+        $data = [];
+        $cols = $this->get_cols_all($tabid);
+        $data = $this->dtf_parse_data($table);
+
+        // Finalize input column list
+        $column_subset = $this->parse_columnlist($columnlist);
+        if ($column_subset == []) {
+            // Use all columns
+            $column_subset = $cols;
+            $col_ids = array_keys($cols);
         } else {
-            //table name is blank.
-            $this->_throw_error(2, "Please enter table name");
-        }
-
-        //get the whole table
-        $aColData = $this->_get_cols_all($tabid);
-        $aTabData = $this->_dtf_parse_data($table);
-        $count    = count($aTabData);
-        for ($r=0;$r<$count;$r++) {
-            $aData[] = $aTabData[$r];
-        }
-
-        //do the work
-        if ($columnlist != '*') {
-            // Remove ` character to be compatible with MySql format
-            $columnlist = str_replace('`', '', $columnlist);
-
-            $column_subset = explode(",", $columnlist);
-
-            //cols is an array of the columnids that should be used
-            $cols   = array();
-            $count  = count($column_subset);
-            $counta = count($aColData);
-            for ($s=0;$s<$count;$s++) {
-                for ($c=0;$c<$counta;$c++) {
-                    if ($aColData[$c] == trim($column_subset[$s])) {
-                        $cols[] = $c;
-                    }
-                }
-            }
-
-            $autokey = false;
-            if (!$make_new_table) {
-                $result = array_search(
-                    $this->tables[$tabid]['key'], $column_subset
-                );
-                if ($result === false) {
-                    //if user did not supply the key column as one of the
-                    //columns, automatically make the next number (id).
-
-                    //get the key column id
-                    $key_id = $this->_get_col_id(
-                        $aColData, $this->tables[$tabid]['key']
-                    );
-
-                    //get an array of all the key values
-                    $key_values = array();
-                    $count      = count($aData);
-                    for ($r=0;$r<$count;$r++) {
-                        $key_values[] = $aData[$r][$key_id];
-                    }
-                    $max_id  = max($key_values);
-                    $next_id = $max_id + 1;
-
-                    $autokey = true;
+            // col_ids is an array of the columnids that should be used
+            $col_ids = [];
+            $invalid_cols = [];
+            foreach ($column_subset as $col) {
+                $col_id = $this->get_col_id($cols, $col);
+                if ($col_id === self::COL_INDEX_NOT_FOUND) {
+                    $invalid_cols[] = $col;
                 } else {
-                    //make sure that the key supplied is not duplicate.
-                    $key_id = $this->_get_col_id(
-                        $column_subset, $this->tables[$tabid]['key']
-                    );
-
-                    //get an array of all the key values
-                    $key_values = array();
-                    $count      = count($aData);
-                    for ($r=1;$r<$count;$r++) {
-                        $key_values[] = $aData[$r][$key_id];
-                    }
-
-                    if (array_search($inData[$key_id], $key_values)) {
-                        //invalid key; not unique.
-                        $this->_throw_error(4, $inData[$key_id]);
-                        $this->error = 4;
-                    }
+                    $col_ids[] = $col_id;
                 }
-                end($aData);
-                $arraykey = key($aData)+1;
-            } else {
-                //making a new table
-
-                //get the key column id
-                $key_id = $this->_get_col_id(
-                    $aColData, $this->tables[$tabid]['key']
-                );
-
-                $result = array_search(
-                    $this->tables[$tabid]['key'], $column_subset
-                );
-                if ($result === false) {
-                    //if user did not supply the key column as one of the
-                    //columns, automatically make the next number (id).
-                    $next_id = 1;
-                    $autokey = true;
-                }
-                $arraykey = 0;
             }
 
-            if (!$this->error) {
-                //add next keyid if it is to be automatic
-                if ($autokey) {
-                    $aData[$arraykey][$key_id] = $next_id;
-                }
-
-                //append the data to the table array
-                $count = count($inData);
-                for ($i=0;$i<$count;$i++) {
-                    $aData[$arraykey][$cols[$i]] = $inData[$i];
-                }
-                $count = count($aColData);
-                for ($i=0;$i<$count;$i++) {
-                    if (!isset($aData[$arraykey][$i])
-                        || $aData[$arraykey][$i] == ''
-                    ) {
-                        $aData[$arraykey][$i] = '';
-                    }
-                }
-
+            // Validate column list
+            if (count($invalid_cols) > 0) {
+                $this->throw_error(
+                    self::ERR_INVALID_COLUMN_NAME,
+                    "on table " . $table . ": " . implode(",", $invalid_cols),
+                );
             }
-            //$aData = $this->_remove_headers($aData);
-            $this->_dtf_write_all($this->tables[$tabid]['name'], $aData);
-            return $next_id;
         }
-        return false;
+
+        if (count($column_subset) != count($in_data)) {
+            $this->throw_error(
+                self::ERR_COLUMN_LIST_MISMATCH,
+                sprintf("got %s but expected %s", count($in_data), count($column_subset))
+            );
+        }
+
+        // Get the key column id
+        $key_id = $this->get_col_id($cols, $this->tables[$tabid]['key']);
+        $autokey = false;
+
+        // User supplied key column?
+        $input_supplied_key_column = array_search(
+            $this->tables[$tabid]['key'],
+            $column_subset
+        );
+        if ($input_supplied_key_column === false) {
+            // If user did not supply the key column as one of the
+            // columns, automatically make the next number (id).
+            $next_id = 1;
+            $autokey = true;
+        } else {
+            $next_id = $in_data[$input_supplied_key_column];
+        }
+
+        if (!$make_new_table) {
+            // Table already exists; not new
+
+            // Get an array of all the key values
+            $key_values = [];
+            foreach ($data as $row) {
+                $key_values[] = $row[$key_id];
+            }
+
+            if ($autokey) {
+                if (max($key_values) < PHP_INT_MAX) {
+                    $next_id = max($key_values) + 1;
+                } else {
+                    $this->throw_error(self::ERR_AUTOKEY_FAIL);
+                }
+            } else {
+                // Make sure that the key supplied is not duplicate.
+                $subset_key_id = $this->get_col_id(
+                    $column_subset,
+                    $this->tables[$tabid]['key']
+                );
+
+                $in_key_value = (string) $in_data[$subset_key_id];
+                if (array_search($in_key_value, $key_values) !== false) {
+                    // Invalid key; not unique.
+                    $this->throw_error(
+                        self::ERR_KEY_NOT_UNIQUE,
+                        $in_data[$subset_key_id]
+                    );
+                }
+            }
+        }
+
+        // Generate new blank record with all cols
+        $new_record = array_fill(0, count($cols), '');
+
+        // Add next keyid if it is to be automatic
+        if ($autokey) {
+            $new_record[$key_id] = $next_id;
+        }
+
+        // Add in input record data
+        foreach ($in_data as $i => $col) {
+            $new_record[$col_ids[$i]] = $col;
+        }
+
+        // Append the data to the table array
+        $data[] = $new_record;
+
+        $this->dtf_write_all($this->tables[$tabid]['name'], $data);
+        return $next_id;
     }
 
     /**
      * Update some rows in a table with data
      *
-     * @param string $table The name of the table
-     * @param string $columnlist Comma separated list of column names
-     * @param array $inUpdateData Array of the data to be updated
-     *                            (matches $columnlist)
-     * @param string $criteria A simple clause to limit the records that
-     *                         will be updated (COL=VALUE)
-     * @return void
+     * @param  string $table          The name of the table
+     * @param  string $columnlist     Comma separated list of column names
+     * @param  array  $in_update_data Array of the data to be updated (matches
+     *                                $columnlist)
+     * @param  string $criteria       Simple clause to limit the records that
+     *                                will be updated (COL=VALUE)
+     * @return int Number of affected rows
      */
-    public function update($table, $columnlist, $inUpdateData, $criteria='')
+    public function update($table, $columnlist, $in_update_data, $criteria = '')
     {
-        //verify table exists in db.
-        if (!empty($table)) {
-            $tabid = $this->_get_tabid($table);
-            if ($tabid === 'Not found') {
-                $this->_throw_error(3, $table); //table does not exist.
-                $make_new_table = true;
+        // Verify table exists in db
+        $tabid = $this->get_valid_tabid($table);
+
+        // Get the whole table
+        $cols = $this->get_cols_all($tabid);
+        $data = $this->get_table_data($table);
+
+        // By default, will affect all records
+        $subset_ids = array_keys($data);
+
+        //----------------------------------
+        // Parse criteria string (COL=VALUE)
+        if ($criteria != '') {
+            $criteria = $this->parse_criteria($criteria, $tabid);
+
+            $criteria->col_id = $this->get_col_id($cols, $criteria->col_name);
+            if ($criteria->col_id !== false) {
+                $subset_ids = $this->find_matching_rows($criteria, $data, true);
             }
         } else {
-            // table name is blank.
-            $this->_throw_error(2, "Please enter table name");
-        }
-
-        //get the whole table
-        $aColData = $this->_get_cols_all($tabid);
-        //$aData[0] = $aColData;
-        $aTabData = $this->_dtf_parse_data($table);
-        for ($r=0;$r<count($aTabData);$r++) {
-            $aData[] = $aTabData[$r];
+            // Target all records
+            $subset_ids = array_keys($data);
         }
 
         //----------------------------------
-        //parse criteria string (COL=VALUE)
-        if ($criteria != '') {
-            $criteria_def = explode("=", $criteria);
-            $ccol_name    = trim($criteria_def[0]);
-            $ccol_value   = trim($criteria_def[1]);
-            if (substr($ccol_value, 0, 1) == "/"
-                && substr($ccol_value, -1, 1) == "/"
-            ) {
-                $regex = true;
-            } else {
-                $regex = false;
-            }
-
-            $ccol_id = $this->_get_col_id($aColData, $ccol_name);
-            if ($ccol_id === 'Not found') {
-                //column doesn't exist. Ignore it.
-            } else {
-                $rowSubset = array();
-                for ($r=0;$r<count($aData);$r++) {
-                    if ($regex) {
-                        //use regular expression
-                        if (preg_match($ccol_value."i", $aData[$r][$ccol_id])) {
-                            //found a match, return this row.
-                            $rowSubset[] = $r;
-                        }
-                    } else {
-                        //plain search.
-                        if ($aData[$r][$ccol_id] == $ccol_value) {
-                            //found a match, return this row.
-                            $rowSubset[] = $r;
-                        }
-                    }
+        // Parse column names (col1, col2, col3...)
+        $column_subset = $this->parse_columnlist($columnlist);
+        if ($column_subset != []) {
+            // col_ids is an array of the columnids that should be used
+            $col_ids = [];
+            $invalid_cols = [];
+            foreach ($column_subset as $col) {
+                $col_id = $this->get_col_id($cols, $col);
+                if ($col_id === self::COL_INDEX_NOT_FOUND) {
+                    $invalid_cols[] = $col;
+                } else {
+                    $col_ids[] = $col_id;
                 }
             }
-        }
 
-        //----------------------------------
-        //parse column names (col1, col2, col3...)
-        if ($columnlist != '') {
-            // Remove ` character to be compatible with MySql format
-            $columnlist = str_replace('`', '', $columnlist);
-
-            $column_subset = explode(",", $columnlist);
-            //cols is an array of the columnids that should be used
-            $cols = array();
-            for ($s=0;$s<count($column_subset);$s++) {
-                $cols[] = $this->_get_col_id(
-                    $aColData, trim($column_subset[$s])
+            // Validate column list
+            if (count($invalid_cols) > 0) {
+                $this->throw_error(
+                    self::ERR_INVALID_COLUMN_NAME,
+                    "on table " . $table . ": " . implode(",", $invalid_cols),
                 );
             }
-
-            //loop through each record subset
-            for ($r=0;$r<count($rowSubset);$r++) {
-                for ($c=0;$c<count($cols);$c++) {
-                    $aData[$rowSubset[$r]][$cols[$c]] = $inUpdateData[$c];
-                }
-            }
-
-            //write the new table to the file.
-            $this->_dtf_write_all($this->tables[$tabid]['name'], $aData);
         }
-        return true;
-    }
 
-    /**
-     * Update a specific field in a row.
-     *
-     * @param string $table The name of the table
-     * @param string $record_id The record_id for which to update the data
-     * @param string $col_id The id of the column to be updated
-     * @param string $col_value The value to set the column to.
-     * @return void
-     */
-    private function _update_field($table, $record_id, $col_id, $col_value='')
-    {
-        //get the whole table
-        $tabid = $this->_get_tabid($table);
-        $aData = $this->_dtf_parse_data($table);
+        if (count($column_subset) != count($in_update_data)) {
+            $this->throw_error(
+                self::ERR_COLUMN_LIST_MISMATCH,
+                sprintf("got %s but expected %s", count($in_update_data), count($column_subset))
+            );
+        }
 
-        //update this field in this record
-        $aData[$record_id][$col_id] = $col_value;
+        // Loop through each record subset and apply updates
+        foreach ($subset_ids as $r) {
+            foreach ($col_ids as $c => $col_id) {
+                $data[$r][$col_id] = $in_update_data[$c];
+            }
+        }
 
-        //write the new table to the file.
-        $this->_dtf_write_all($this->tables[$tabid]['name'], $aData);
+        // Write the new table to the file.
+        $this->dtf_write_all($this->tables[$tabid]['name'], $data);
+
+        // Return number of rows affected
+        return count($subset_ids);
     }
 
     /**
      * Delete record(s) from a table
      *
-     * @param string $table The name of the table
-     * @param string $criteria A Simple string to indicate a condition
-     *                         for which to remove records (COL=VALUE)
-     * @return void
+     * @param  string $table    The name of the table
+     * @param  string $criteria Simple string to indicate a condition
+     *                          for which to remove records (COL=VALUE)
+     * @return int Number of affected rows
      */
-    public function delete($table, $criteria='')
+    public function delete($table, $criteria = '')
     {
-        //verify table exists in db.
-        if (!empty($table)) {
-            $tabid = $this->_get_tabid($table);
-            if ($tabid === 'Not found') {
-                $this->_throw_error(3, $table); //table does not exist.
-                $make_new_table = true;
+        // Verify table exists in db.
+        $tabid = $this->get_valid_tabid($table);
+
+        // Get the whole table
+        $cols = $this->get_cols_all($tabid);
+        $data = $this->get_table_data($table);
+
+        //----------------------------------
+        // Parse criteria string (COL=VALUE)
+        if ($criteria != '') {
+            $criteria = $this->parse_criteria($criteria, $tabid);
+
+            $criteria->col_id = $this->get_col_id($cols, $criteria->col_name);
+            $to_delete_ids = [];
+            if ($criteria->col_id !== false) {
+                $to_delete_ids = $this->find_matching_rows($criteria, $data, true);
             }
         } else {
-            //table name is blank.
-            $this->_throw_error(2, "Please enter table name");
+            // Target all records!
+            $to_delete_ids = array_keys($data);
         }
 
-        //get the whole table
-        $aColData = $this->_get_cols_all($tabid);
+        if (count($to_delete_ids) > 0) {
+            // Delete targeted rows
+            foreach ($to_delete_ids as $id) {
+                unset($data[$id]);
+            }
 
-        $aTabData = $this->_dtf_parse_data($table);
-        for ($r=0;$r<count($aTabData);$r++) {
-            $aData[] = $aTabData[$r];
+            $new_data = array_values($data);
+
+            // Write the new table to the file.
+            $this->dtf_write_all($this->tables[$tabid]['name'], $new_data);
         }
 
-        //----------------------------------
-        //parse criteria string (COL=VALUE)
-        if ($criteria != '') {
+        return count($to_delete_ids);
+    }
+
+    /**
+     * Parse a columnlist input and return array
+     *
+     * @param  mixed $columnlist
+     * @return array
+     */
+    private function parse_columnlist($columnlist)
+    {
+        if (!is_array($columnlist)) {
+            $columnlist = trim($columnlist);
+
+            if ($columnlist == "*" || $columnlist == "") {
+                return [];
+            }
+
+            $columnlist = explode(",", $columnlist);
+        }
+
+        // Remove ` character to be compatible with mysql format
+        $columnlist = array_map(
+            function ($i) {
+                return str_replace('`', '', $i);
+            },
+            $columnlist
+        );
+
+        $columnlist = array_map('trim', $columnlist);
+        return $columnlist;
+    }
+
+    /**
+     * Parse a criteria input
+     *
+     * @param  string $criteria
+     * @return array
+     */
+    private function parse_criteria($criteria, $tabid)
+    {
+        // Generate a criteria object
+        $obj = (object) ["is_regex" => false];
+
+        if (strpos($criteria, '=') !== false) {
             $criteria_def = explode("=", $criteria);
-            $ccol_name    = trim($criteria_def[0]);
-            $ccol_value   = trim($criteria_def[1]);
-            if (substr($ccol_value, 0, 1) == "/"
-                && substr($ccol_value, -1, 1) == "/"
-            ) {
-                $regex = true;
-            } else {
-                $regex = false;
-            }
-
-            $ccol_id = $this->_get_col_id($aColData, $ccol_name);
-            if ($ccol_id === 'Not found') {
-                //column doesn't exist. Ignore it.
-            } else {
-                $aData2  = array();
-                $deleted = array();
-                for ($r=0;$r<count($aData);$r++) {
-                    if ($regex) {
-                        //use regular expression
-                        if (preg_match($ccol_value."i", $aData[$r][$ccol_id])) {
-                            //found a (non)-match, return this row.
-                            $deleted[] = $aData[$r];
-                        } else {
-                            $aData2[] = $aData[$r];
-                        }
-                    } else {
-                        //plain search.
-                        if ($aData[$r][$ccol_id] == $ccol_value) {
-                            //found a (non)-match, return this row.
-                            $deleted[] = $aData[$r];
-                        } else {
-                            $aData2[] = $aData[$r];
-                        }
-                    }
-                }
-            }
+            $obj->col_name = trim($criteria_def[0]);
+            $obj->value = trim($criteria_def[1]);
+        } else {
+            // Assume key column is column to search
+            $obj->col_name = $this->tables[$tabid]['key'];
+            $obj->value = trim($criteria);
         }
-        //write the new table to the file.
-        $this->_dtf_write_all($this->tables[$tabid]['name'], $aData2);
+
+        // Special handling for 'COL=true'
+        if ($obj->value == 'true') {
+            $obj->value = 1;
+        }
+
+        // Special handling for 'COL=false'
+        if ($obj->value == 'false') {
+            $obj->value = '';
+        }
+
+        // Detect if regex
+        if (
+            substr($obj->value, 0, 1) == "/"
+            && substr($obj->value, -1, 1) == "/"
+        ) {
+            $obj->is_regex = true;
+        }
+
+        return $obj;
     }
 
     /**
-     * Allows you to further filter an array based on criteria for a
-     * specific index of the array.
-     * This assumes you do not include an array with headers.
+     * Find a subset of matching rows from a criteria obj
      *
-     * @param array $arrayData An array of data returned from a
-     *                         previous select() statement.
-     * @param string $index The index of the array data to select
-     * @param string $criteria A simple string to specify a criteria
-     *                         for limiting the records (COL=VALUE)
-     * @param string $order Column name to sort order by.
-     * @return array An array of the data retrieved from subselect
+     * @param  object $criteria
+     * @param  array  $records
+     * @param  bool   $as_row_ids Whether to return a list of row ids instead
+     * @return array
      */
-    public function subSelect($arrayData, $index, $criteria, $order)
+    private function find_matching_rows($criteria, $records, $as_row_ids = false)
     {
-        if (!is_array($arrayData)) {
-            $this->_throw_error(3, $table);
+        $rows = [];
+
+        if ($criteria->col_id === self::COL_INDEX_NOT_FOUND) {
+            // Column doesn't exist. Ignore it.
+            // So, that means there are no results.
+            return $rows;
         }
 
-        //----------------------------------
-        //parse criteria string (COL=VALUE)
-        if ($criteria != '') {
-            if (substr($criteria, 0, 1) == "/"
-                && substr($criteria, -1, 1) == "/"
-            ) {
-                $regex = true;
-            } else {
-                $regex = false;
-            }
-
-            $ccol_id = $index;
-            if ($ccol_id === 'Not found') {
-                //column doesn't exist. Ignore it.
-            } else {
-                $aRetData = array();
-                //$aRetData[] = $arrayData[0];
-                for ($r=0;$r<count($arrayData);$r++) {
-                    if ($regex) {
-                        //use regular expression
-                        $result = preg_match(
-                            $criteria . "i", $arrayData[$r][$index]
-                        );
-                        if ($result) {
-                            //found a match, return this row.
-                            $aRetData[] = $arrayData[$r];
-                        }
-                    } else {
-                        //plain search.
-                        if ($arrayData[$r][$index] == $criteria) {
-                            //found a match, return this row.
-                            $aRetData[] = $arrayData[$r];
-                        }
-                    }
+        foreach ($records as $row_id => $record) {
+            if ($criteria->is_regex) {
+                // Use regular expression
+                if (preg_match($criteria->value . "i", $record[$criteria->col_id])) {
+                    // Found a match, return this row.
+                    $rows[] = $as_row_ids ? $row_id : $record;
                 }
-                $aData = $aRetData;
+            } else {
+                // Plain search
+                if ($record[$criteria->col_id] == $criteria->value) {
+                    // Found a match, return this row.
+                    $rows[] = $as_row_ids ? $row_id : $record;
+                }
             }
         }
 
-        //----------------------------------
-        //parse order string (comma delimited??)
-        if ($order != '') {
-            $order_values = array();
-            for ($r=0;$r<count($aData);$r++) {
-                $order_values[$r] = $aData[$r][$order];
-            }
-            //uasort($order_values, strcasecmp);
-            natsort($order_values);
-
-            $aRetData = array();
-            //$aRetData[0] = $aData[0];
-            reset($aData);
-            while ($r = current($order_values)) {
-                $aRetData[] = $aData[key($order_values)];
-                next($order_values);
-            }
-            $aData = $aRetData;
-        }
-
-        return $aData;
+        return $rows;
     }
 
     /**
-     * Removes the headers (columnnames) from the data array.
+     * Return the tabid for a given table. If not found returns -1
      *
-     * @param array &$aData The array data from which the data column
-     *                      should be stripped.
-     * @return void
+     * @param  string $table_name The table name to find
+     * @return mixed
      */
-    private function _remove_headers(&$aData)
+    private function get_tabid($table_name)
     {
-        //return the array without the first row.
-        array_shift($aData);
+        foreach ($this->tables as $t => $table) {
+            if ($table['name'] == $table_name) {
+                return $t;
+            }
+        }
+
+        return self::TABLE_INDEX_NOT_FOUND;
+    }
+
+    /**
+     * Return an array of all the columns for a tabid
+     *
+     * @param  string $tabid Table id
+     * @return array
+     */
+    private function get_cols_all($tabid)
+    {
+        $cols = [];
+
+        for ($c = 0; $c < $this->tables[$tabid]['cols']; $c++) {
+            $cols[] = $this->tables[$tabid][$c];
+        }
+
+        return $cols;
+    }
+
+    /**
+     * Returns a col_id of a column name from a column list array. If not
+     * found returns -1
+     *
+     * @param  array  $cols Array of column names
+     * @param  string $name Name of column
+     * @return mixed
+     */
+    private function get_col_id($cols, $name)
+    {
+        foreach ($cols as $i => $col) {
+            if ($col == $name) {
+                return $i;
+            }
+        }
+
+        return self::COL_INDEX_NOT_FOUND;
     }
 
     /**
@@ -878,13 +814,13 @@ class Hazelplum
      *
      * @return bool Whether the data was loaded successfully.
      */
-    private function _get_db_defs()
+    private function get_db_defs()
     {
-        if ($this->_options['use_cache'] && $this->_get_dbd_cache()) {
+        if ($this->options['use_cache'] && $this->get_dbd_cache()) {
             return true;
-        } else {
-            return $this->_dbd_parse_data();
         }
+
+        return $this->dbd_parse_data();
     }
 
     /**
@@ -892,14 +828,18 @@ class Hazelplum
      *
      * @return bool Whether the file was found and loaded.
      */
-    private function _get_dbd_cache()
+    private function get_dbd_cache()
     {
-        $dbd_cache_file = $this->_get_dbd_cache_filename();
+        $dbd_cache_file = $this->get_dbd_cache_filename();
+
         if (file_exists($dbd_cache_file)) {
-            $dbd_data     = file_get_contents($dbd_cache_file);
-            $this->tables = eval('return ' . $dbd_data . ';');
+            $dbd_data = file_get_contents($dbd_cache_file);
+
+            $this->tables = unserialize($dbd_data);
+
             return true;
         }
+
         return false;
     }
 
@@ -908,126 +848,63 @@ class Hazelplum
      *
      * @return void
      */
-    private function _write_dbd_cache()
+    private function write_dbd_cache()
     {
-        $dbd_cache_file = $this->_get_dbd_cache_filename();
-        file_put_contents($dbd_cache_file, var_export($this->tables, 1));
+        $dbd_cache_file = $this->get_dbd_cache_filename();
+        file_put_contents($dbd_cache_file, serialize($this->tables));
     }
 
     /**
      * Get the filename for the dbd cache file.
      *
-     * @return void
+     * @return string
      */
-    private function _get_dbd_cache_filename()
+    private function get_dbd_cache_filename()
     {
-        return $this->datapath . "." . $this->database_name
-            . $this->db_fileextension . ".php";
+        return $this->datapath . DIRECTORY_SEPARATOR
+            . "." . $this->database_name . $this->db_fileextension . ".cache";
     }
 
     /**
-     * Return the tabid for a given table. If not found returns "Not found"
-     *
-     * @param string $table The table name
-     * @return mixed
-     */
-    private function _get_tabid($table)
-    {
-        for ($t=0;$t<count($this->tables);$t++) {
-            if ($this->tables[$t]['name'] == $table) {
-                return $t;
-            }
-        }
-        return "Not found";
-    }
-
-    /**
-     * Return an array of all the columns for a tabid
-     *
-     * @param string $tabid Table id
-     * @return array
-     */
-    private function _get_cols_all($tabid)
-    {
-        $aCols = array();
-        for ($c=0;$c<$this->tables[$tabid]['cols'];$c++) {
-            $aCols[] = $this->tables[$tabid][$c];
-        }
-        return $aCols;
-    }
-
-    /**
-     * Returns a col_id of a column name from a column list array. If not
-     * found returns "Not found"
-     *
-     * @param array $colList Array of column ids
-     * @param string $colName Name of column
-     * @return mixed
-     */
-    private function _get_col_id($colList, $colName)
-    {
-        for ($i=0;$i<count($colList);$i++) {
-            if ($colList[$i]==$colName) {
-                return $i;
-            }
-        }
-        return "Not found";
-    }
-
-    /**
-     * Get the filename for a table
-     *
-     * @param string $table Name of table
-     * @return string The filename
-     */
-    private function _get_table_filename($table)
-    {
-        $filename = $this->datapath;
-        if ($this->_options['prepend_databasename_to_table_filename']) {
-            $filename .= $this->database_name . ".";
-        }
-        $filename .= $table . $this->table_fileextension;
-        return $filename;
-    }
-
-    /**
-     * Parse the dbd file, put degs in array tables.
+     * Parse the dbd file, put defs in array tables.
      *
      * @return boolean
      */
-    private function _dbd_parse_data()
+    private function dbd_parse_data()
     {
-        $dbd_path = $this->datapath . DIRECTORY_SEPARATOR . $this->database_name . DIRECTORY_SEPARATOR . $this->db_fileextension;
-        if (!file_exists($dbd_path)) {
-            $this->throw_error(self::ERROR_DATABASE_NOT_FOUND, $this->database_name . $this->db_fileextension);
-            return false;
+        $dbd_filename = $this->datapath . DIRECTORY_SEPARATOR
+            . $this->database_name . $this->db_fileextension;
+        if (!file_exists($dbd_filename)) {
+            $this->throw_error(self::ERR_DBD_FILE_MISSING, $dbd_filename);
         }
 
-        $dbd_data = file_get_contents(
-            $this->datapath . $this->database_name . $this->db_fileextension
-        );
-        if ($dbd_data) {
-            $dbd   = explode("\n", $dbd_data);
-            $tabid = 0;
-            $cols  = 0;
+        $dbd_defs = file($dbd_filename);
+        if (!$dbd_defs) {
+            $this->throw_error(self::ERR_DBD_FILE_EMPTY, $dbd_filename);
+        }
 
-            $this->tables[$tabid]['name'] = '';
-            $this->tables[$tabid]['cols'] = 0;
-            $this->tables[$tabid]['key']  = '';
+        $tabid = 0;
+        $cols = 0;
 
-            for ($line=0;$line<count($dbd);$line++) {
-                if (substr($dbd[$line], 0, 2) == "**") {
-                    $tabid++;
-                    $cols = 0;
+        $this->tables[$tabid] = [];
+        $this->tables[$tabid]['name'] = '';
+        $this->tables[$tabid]['cols'] = 0;
+        $this->tables[$tabid]['key'] = '';
 
-                    $this->tables[$tabid]['name'] = '';
-                    $this->tables[$tabid]['cols'] = 0;
-                    $this->tables[$tabid]['key']  = '';
-                }
+        foreach ($dbd_defs as $line) {
+            if (substr($line, 0, 2) == "**") {
+                $tabid++;
+                $cols = 0;
 
-                $key = trim(substr($dbd[$line], 0, 4));
-                $value = trim(substr($dbd[$line], 3));
-                switch ($key) {
+                $this->tables[$tabid] = [];
+                $this->tables[$tabid]['name'] = '';
+                $this->tables[$tabid]['cols'] = 0;
+                $this->tables[$tabid]['key']  = '';
+            }
+
+            $key = trim(substr($line, 0, 4));
+            $value = trim(substr($line, 3));
+            switch ($key) {
                 case 'TAB':
                     $this->tables[$tabid]['name'] = $value;
                     break;
@@ -1042,217 +919,159 @@ class Hazelplum
                     $cols++;
                     $this->tables[$tabid]['cols'] = $cols;
                     break;
-                }
             }
-            $this->_write_dbd_cache();
-            return true;
-        } else {
-            $this->_throw_error(
-                1, $this->database_name . $this->db_fileextension
-            );
-            return false;
         }
+
+        $this->write_dbd_cache();
+
+        return true;
     }
 
     /**
      * Get the data for a table
      *
-     * @param string $table_name The name of the table
+     * @param  string $table_name The name of the table
      * @return mixed
      */
-    private function _get_table_data($table_name)
+    private function get_table_data($table_name)
     {
-        if ($this->_options['use_cache']) {
-            $data = $this->_get_dtf_cache($table_name);
-            if ($data) {
-                return $data;
-            }
+        // Don't cache dtf files - it isn't performant
+        return $this->dtf_parse_data($table_name);
+    }
+
+    /**
+     * Get the filename for a table
+     *
+     * @param  string $table_name Name of table
+     * @return string The filename
+     */
+    private function get_table_filename($table_name)
+    {
+        $prefix = "";
+        if ($this->options['prepend_databasename_to_table_filename']) {
+            $prefix = $this->database_name . ".";
         }
-        return $this->_dtf_parse_data($table_name);
-    }
 
-    /**
-     * Get table data from cache file
-     *
-     * @param string $table The name of the table
-     * @return bool Whether the file was found and loaded.
-     */
-    private function _get_dtf_cache($table)
-    {
-        $dtf_cache_file = $this->_get_dtf_cache_filename($table);
-        if (file_exists($dtf_cache_file)) {
-            $dtf_data = file_get_contents($dtf_cache_file);
-            return eval('return ' . $dtf_data . ';');
-        }
-        return false;
-    }
-
-    /**
-     * Write the dtf cache file.
-     *
-     * @param string $table The name of the table
-     * @param array $table_data The table data to write
-     * @return void
-     */
-    private function _write_dtf_cache($table, $table_data)
-    {
-        $dtf_cache_file = $this->_get_dtf_cache_filename($table);
-        file_put_contents($dtf_cache_file, var_export($table_data, 1));
-    }
-
-    /**
-     * Get the filename for the dtf cache file for a table.
-     *
-     * @param string $table The name of the table
-     * @return string
-     */
-    private function _get_dtf_cache_filename($table)
-    {
-        return $this->datapath . "." . $this->database_name
-            . "." . $table . $this->table_fileextension . ".php";
-    }
-
-    /**
-     * Cleat the dtf cache for a given table
-     *
-     * @param string $table The name of the table
-     * @return void
-     */
-    private function _clear_dtf_cache($table)
-    {
-        $dtf_cache_file = $this->_get_dtf_cache_filename($table);
-        if (is_file($dtf_cache_file)) {
-            unlink($dtf_cache_file);
-        }
+        return sprintf(
+            "%s/%s%s%s",
+            $this->datapath,
+            $prefix,
+            $table_name,
+            $this->table_fileextension
+        );
     }
 
     /**
      * Parse a dtf file and return 2d array.
      *
-     * @param string $table The name of the table to parse
+     * @param  string $table The name of the table to parse
      * @return mixed Array data or false
      */
-    private function _dtf_parse_data($table)
+    private function dtf_parse_data($table)
     {
-        $filename = $this->_get_table_filename($table);
-        if ($contents = $this->_read_file($filename)) {
-            $rows  = explode($this->row_delimiter, $contents);
-            $count = count($rows);
-            for ($row=0;$row<$count;$row++) {
-                $rows[$row] = explode($this->col_delimiter, $rows[$row]);
-                // trim white space off the first column.
-                $rows[$row][0] = trim($rows[$row][0]);
-            }
-            unset($rows[$count-1]); //take off the last row (it is blank)
-            $this->_write_dtf_cache($table, $rows);
-            return $rows;
-        } else {
-            return false;
-        }
-    }
+        $filename = $this->get_table_filename($table);
 
-    /**
-     * Writes record(s) to datafile
-     *
-     * This function is deprecated
-     *
-     * @param string $filename The name of the file
-     * @param array $aData The data to write
-     * @return void
-     */
-    private function _dtf_write($filename, $aData)
-    {
-        global $datapath; global $col_delimiter; global $row_delimiter;
-
-        //open the file to append
-        $writefile = fopen($this->datapath.$filename, 'a');
-        $rowline   = "";
-
-        for ($col=0; $col<count($aData); $col++) {
-            $rowline .= $aData[$col].$col_delimiter;
+        $contents = $this->read_file($filename);
+        if (!$contents) {
+            return [];
         }
 
-        //got to take off the last $col_delimiter at the end of the row.
-        $rowline = substr($rowline, 0, -1);
-        fputs($writefile, stripslashes($rowline));
-        fputs($writefile, $row_delimiter."\n");
+        $rows = explode($this->row_delimiter, $contents);
 
-        fclose($writefile);
+        // Take off last row, it is blank
+        array_pop($rows);
+
+        foreach ($rows as &$row) {
+            // Trim white space off at beginning
+            $row = ltrim($row);
+            $row = explode($this->col_delimiter, $row);
+        }
+
+        return $rows;
     }
 
     /**
      * Writes records into entire file
      *
-     * @param string $tablename The name of the table
-     * @param array $aData The array of data to write
+     * @param  string $tablename The name of the table
+     * @param  array  $data      The array of data to write
      * @return void
      */
-    private function _dtf_write_all($tablename, $aData)
+    private function dtf_write_all($tablename, $data)
     {
-        $filename = $this->_get_table_filename($tablename);
+        $filename = $this->get_table_filename($tablename);
 
-        //open the file to write to.
+        // Open the file to write to.
         $writefile = fopen($filename, 'w');
-        for ($row=0; $row<count($aData); $row++) {
-            $rowline = "";
-            for ($col=0; $col<count($aData[$row]); $col++) {
-                $rowline .= $aData[$row][$col] . $this->col_delimiter;
-            }
 
-            //got to take off the last $col_delimiter at the end of the row.
-            $rowline = substr($rowline, 0, -1);
+        foreach ($data as $row) {
+            $rowline = implode($this->col_delimiter, $row);
+
             fputs($writefile, stripslashes($rowline));
-            fputs($writefile, $this->row_delimiter."\n");
+            fputs($writefile, $this->row_delimiter . "\n");
         }
+
         fflush($writefile);
         fclose($writefile);
         clearstatcache();
-        $this->_clear_dtf_cache($tablename);
     }
 
     /**
      * Simply reads a file and returns the contents.
      *
-     * @param mixed $filename The name of the file to read
-     * @return void
+     * @parammixed $filename The name of the file to read
+     * @return     false|string
      */
-    private function _read_file($filename)
+    private function read_file($filename)
     {
         if (!file_exists($filename)) {
-            return;
+            return false;
         }
 
         if (filesize($filename) > 0) {
             return file_get_contents($filename);
-        } else {
-            return false;
         }
+
+        return false;
     }
 
     /**
      * Custom method to indicate an error
      *
-     * @param int $err The error code
-     * @param string $context Additional message to accompany error
+     * @param  int    $err  The error code
+     * @param  string $text Additional message to accompany error
      * @return void
      */
-    private function throw_error($err, $context = '')
+    private function throw_error($err, $text = '')
     {
         switch ($err) {
-        case self::ERROR_DATABASE_NOT_FOUND:
-            throw new DatabaseNotFoundException(
-                sprintf("E%s: DBD file not found: '%s'.", self::ERROR_DATABASE_NOT_FOUND, $context)
-            );
-            break;
-        case 2:
-            $message = "No table parameter: $context.";
-            break;
-        case 3:
-            $message = "Invalid table name: $context.";
-            break;
-        case 4:
-            $message = "Invalid key (not unique): $context.";
-            break;
+            case self::ERR_DBD_FILE_MISSING:
+                $message = "DBD file missing or not readable: $text.";
+                break;
+            case self::ERR_MISSING_TABLE_PARAM:
+                $message = "No table parameter: $text.";
+                break;
+            case self::ERR_TABLE_NOT_FOUND:
+                $message = "Table not found: $text.";
+                break;
+            case self::ERR_KEY_NOT_UNIQUE:
+                $message = "Invalid key (not unique): $text.";
+                break;
+            case self::ERR_DBD_FILE_EMPTY:
+                $message = "DBD file empty: $text.";
+                break;
+            case self::ERR_INVALID_COLUMN_NAME:
+                $message = "Column name(s) do not exist $text.";
+                break;
+            case self::ERR_COLUMN_LIST_MISMATCH:
+                $message = "Input column list not same length of input data; $text.";
+                break;
+            case self::ERR_AUTOKEY_FAIL:
+                $message = "Cannot auto assign next key id, out of bounds; $text.";
+                break;
+            default:
+                $message = "An error occurred.";
+                break;
         }
 
         throw new \Exception($message);

@@ -9,7 +9,9 @@
             "email": "jansen.price@gmail.com"
         }
     ],
-    "require": {},
+    "require": {
+        "phpunit/phpunit": "*"
+    },
     "autoload": {
         "psr-4" : {
             "" : "src/"
