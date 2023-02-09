@@ -5,7 +5,7 @@
  *
  * Delimited Text File Database System
  *
- * @package Projekt\Db
+ * @package Hazelplum
  */
 
 namespace Hazelplum;
