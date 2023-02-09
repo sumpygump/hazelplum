@@ -53,6 +53,8 @@ Once we have a dbd file defined and in place, you can start using the Hazelplum 
 First spin up a database connection object (Hazelplum class object), defining where the db files live and the name of the database to use.
 
 ```
+require_once 'vendor/autoload.php';
+
 use Hazelplum\Hazelplum;
 
 $data_location = "data"; // Directory where the db files live
