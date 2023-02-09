@@ -11,7 +11,7 @@
 namespace Hazelplum;
 
 /*
-Hazelplum DB v2.1 (2023-01-17))
+Hazelplum DB v2.2 (2023-02-09))
 Delimited Text File Database System
 
 PUBLIC METHODS:
@@ -53,6 +53,7 @@ CHANGELOG:
             Much clean up and refactoring
 2021-06-12: Updates to make compatible with PHP 8.0
 2023-01-17: Additional refactoring
+2023-02-09: Add a few bug fixes found through testing
  */
 
 /**
@@ -61,7 +62,7 @@ CHANGELOG:
  * @package Hazelplum
  * @author Jansen Price <jansen.price@gmail.com>
  * @license http://www.opensource.org/licenses/mit-license.php MIT
- * @version 2.1
+ * @version 2.2
  */
 class Hazelplum
 {
@@ -187,7 +188,9 @@ class Hazelplum
                     $this->options['use_cache'] = ! (bool) $option;
                     break;
                 case 'compat_legacy_delimiters':
+                    var_dump($option);
                     if ($option) {
+                        echo "Using legacy delimiters";
                         // Use the legacy delimiters
                         $this->col_delimiter = chr(200);
                         $this->row_delimiter = chr(201);
@@ -308,7 +311,7 @@ class Hazelplum
         //----------------------------------
         // Parse order string (TODO: comma delimited??)
         if ($order != '') {
-            $order_parts = explode(" ", $order);
+            $order_parts = explode(" ", $order, 2);
             $ocol_id = $this->get_col_id($cols, $order_parts[0]);
             if ($ocol_id === self::COL_INDEX_NOT_FOUND) {
                 // Column doesn't exist. Ignore it.
@@ -323,7 +326,7 @@ class Hazelplum
 
                 if (
                     isset($order_parts[1])
-                    && strtolower($order_parts[1]) == 'desc'
+                    && trim(strtolower($order_parts[1])) == 'desc'
                 ) {
                     $order_values = array_reverse($order_values, true);
                 }
@@ -577,6 +580,10 @@ class Hazelplum
                     "on table " . $table . ": " . implode(",", $invalid_cols),
                 );
             }
+        } else {
+            // empty list means all cols
+            $column_subset = $cols;
+            $col_ids = array_keys($column_subset);
         }
 
         if (count($column_subset) != count($in_update_data)) {
@@ -796,7 +803,7 @@ class Hazelplum
      *
      * @param  array  $cols Array of column names
      * @param  string $name Name of column
-     * @return mixed
+     * @return int
      */
     private function get_col_id($cols, $name)
     {
@@ -1044,27 +1051,36 @@ class Hazelplum
      */
     private function throw_error($err, $text = '')
     {
+        $exception_class = null;
+
         switch ($err) {
             case self::ERR_DBD_FILE_MISSING:
                 $message = "DBD file missing or not readable: $text.";
+                $exception_class = Exception\DatabaseNotFoundException::CLASS;
                 break;
             case self::ERR_MISSING_TABLE_PARAM:
                 $message = "No table parameter: $text.";
+                $exception_class = Exception\TableNotFoundException::CLASS;
                 break;
             case self::ERR_TABLE_NOT_FOUND:
                 $message = "Table not found: $text.";
+                $exception_class = Exception\TableNotFoundException::CLASS;
                 break;
             case self::ERR_KEY_NOT_UNIQUE:
                 $message = "Invalid key (not unique): $text.";
+                $exception_class = Exception\DuplicateKeyException::CLASS;
                 break;
             case self::ERR_DBD_FILE_EMPTY:
                 $message = "DBD file empty: $text.";
+                $exception_class = Exception\DatabaseNotFoundException::CLASS;
                 break;
             case self::ERR_INVALID_COLUMN_NAME:
                 $message = "Column name(s) do not exist $text.";
+                $exception_class = Exception\ColumnNotFoundException::CLASS;
                 break;
             case self::ERR_COLUMN_LIST_MISMATCH:
                 $message = "Input column list not same length of input data; $text.";
+                $exception_class = Exception\ColumnListMismatchException::CLASS;
                 break;
             case self::ERR_AUTOKEY_FAIL:
                 $message = "Cannot auto assign next key id, out of bounds; $text.";
@@ -1072,6 +1088,10 @@ class Hazelplum
             default:
                 $message = "An error occurred.";
                 break;
+        }
+
+        if ($exception_class) {
+            throw new $exception_class($message);
         }
 
         throw new \Exception($message);

@@ -1,3 +1,5 @@
 vendor/
 .phpunit.result.cache
 .qis
+.phpunit.cache
+composer.lock
