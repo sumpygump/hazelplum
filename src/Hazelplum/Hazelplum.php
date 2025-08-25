@@ -188,9 +188,7 @@ class Hazelplum
                     $this->options['use_cache'] = ! (bool) $option;
                     break;
                 case 'compat_legacy_delimiters':
-                    var_dump($option);
                     if ($option) {
-                        echo "Using legacy delimiters";
                         // Use the legacy delimiters
                         $this->col_delimiter = chr(200);
                         $this->row_delimiter = chr(201);

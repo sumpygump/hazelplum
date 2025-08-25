@@ -7,11 +7,11 @@
     cacheDirectory=".phpunit.cache"
     backupStaticProperties="false"
 >
-  <coverage>
+  <source>
     <include>
-      <directory>../src</directory>
+      <directory suffix=".php">../src</directory>
     </include>
-  </coverage>
+  </source>
   <testsuites>
     <testsuite name="Unit Tests">
       <directory>.</directory>
